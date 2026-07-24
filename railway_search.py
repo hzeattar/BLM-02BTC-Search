@@ -112,8 +112,9 @@ def is_valid_checksum(words):
 # Worker
 # ----------------------------------------------------------------------
 
-def worker_init(counter, total, start_time):
-    global g_counter, g_total, g_start
+def worker_init(lock, counter, total, start_time):
+    global g_lock, g_counter, g_total, g_start
+    g_lock = lock
     g_counter = counter
     g_total = total
     g_start = start_time
@@ -132,7 +133,7 @@ def process_task(args):
         if addr == TARGET_ADDRESS:
             return (" ".join(words_tuple), pp, addr)
 
-    with g_counter.get_lock():
+    with g_lock:
         g_counter.value += 1
         cnt = g_counter.value
         if cnt % 100 == 0 or cnt == 1:
@@ -167,6 +168,7 @@ def search_matrix(matrix, passphrases=None, max_workers=None):
         max_workers = max(1, cpu_count() - 1)
 
     manager = Manager()
+    lock = manager.Lock()
     counter = manager.Value("i", 0)
     total_counter = manager.Value("i", total)
     start_time = manager.Value("d", time.time())
@@ -179,7 +181,7 @@ def search_matrix(matrix, passphrases=None, max_workers=None):
     with Pool(
         processes=max_workers,
         initializer=worker_init,
-        initargs=(counter, total_counter, start_time),
+        initargs=(lock, counter, total_counter, start_time),
     ) as pool:
         for result in pool.imap_unordered(process_task, gen(), chunksize=100):
             if result:
@@ -207,6 +209,7 @@ def search_constrained(core_set, fixed_positions=None, passphrases=None, max_wor
         max_workers = max(1, cpu_count() - 1)
 
     manager = Manager()
+    lock = manager.Lock()
     counter = manager.Value("i", 0)
     total_counter = manager.Value("i", total)
     start_time = manager.Value("d", time.time())
@@ -226,7 +229,7 @@ def search_constrained(core_set, fixed_positions=None, passphrases=None, max_wor
     with Pool(
         processes=max_workers,
         initializer=worker_init,
-        initargs=(counter, total_counter, start_time),
+        initargs=(lock, counter, total_counter, start_time),
     ) as pool:
         for result in pool.imap_unordered(process_task, gen(), chunksize=200):
             if result:
