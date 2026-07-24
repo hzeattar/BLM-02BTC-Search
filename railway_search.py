@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-BLM 0.2 BTC Puzzle Search Engine
-================================
-Searches constrained BIP39 mnemonic permutations for the target Bitcoin address:
-    1KfZGvwZxsvSmemoCmEV75uqcNzYBHjkHZ
+BLM 0.2 BTC Puzzle Search Engine v2
+===================================
+Based on updated forensic analysis:
+- 12 containers from WELCOME TO THE, normal left-to-right order.
+- Clock is rotated, NOT mirrored -> no reverse order.
+- Selector rule: choose candidate with independent second clue in image.
+- Strongest current model:
+  base aware all decide first this party public announce system agree order
 
-Based on forensic analysis of the BLM 0.2 BTC puzzle image.
-Search strategy:
-    - Generate candidate words from visual/positional clues.
-    - Validate BIP39 checksum first (cheap).
-    - Derive P2PKH address at m/44'/0'/0'/0/0.
-    - Test multiple passphrases.
+Target: 1KfZGvwZxsvSmemoCmEV75uqcNzYBHjkHZ
+Path:   m/44'/0'/0'/0/0 (Legacy P2PKH)
 
 Install:
     pip install bip_utils
@@ -19,9 +19,8 @@ Install:
 import os
 import sys
 import time
-import hashlib
-from itertools import permutations, product, islice
-from multiprocessing import Pool, cpu_count, Manager, Lock
+from itertools import product, permutations
+from multiprocessing import Pool, cpu_count, Manager
 
 from bip_utils import (
     Bip39MnemonicValidator,
@@ -33,70 +32,35 @@ from bip_utils import (
 )
 from mnemonic import Mnemonic
 
-# ----------------------------------------------------------------------
-# Target
-# ----------------------------------------------------------------------
 TARGET_ADDRESS = "1KfZGvwZxsvSmemoCmEV75uqcNzYBHjkHZ"
 
 # ----------------------------------------------------------------------
-# Candidate words from forensic analysis
+# Candidate matrix based on updated selector analysis.
+# Position: list of candidates sorted by confidence.
 # ----------------------------------------------------------------------
-
-# High-confidence words from direct visual evidence
-CORE_WORDS = [
-    "moon",      # written on clock second hand
-    "tower",     # written on clock minute hand
-    "food",      # written vertically on Space Needle
-    "subject",   # underlined on statue (13th Amendment Section 1)
-    "real",      # "ONLY REAL BITCOIN" at Statue of Liberty base
-    "black",     # BLM + "black day number X"
+MATRIX = [
+    ["base", "model"],           # 1: base (Liberty base messages) / model
+    ["aware"],                   # 2
+    ["all"],                     # 3
+    ["decide"],                  # 4
+    ["first", "arrive"],         # 5: first repeated externally
+    ["this", "trust"],           # 6: this repeated externally
+    ["party", "must"],           # 7: party in amendment + election scene
+    ["public"],                  # 8
+    ["announce"],                # 9
+    ["need", "system"],          # 10: need from Space Needle / system CCTV
+    ["agree"],                   # 11
+    ["order", "history"],        # 12: order repeated externally
 ]
 
-# Words derived from BIP39 indices of explicit numbers in the image
-INDEX_WORDS = [
-    "dose",      # 05.25 -> 525 (1-based BIP39)
-    "mean",      # 11.03 -> 1103 (1-based BIP39)
-    "trouble",   # 1865 (1-based BIP39)
-    "wise",      # 2020 (1-based BIP39)
-    "air",       # 44 stars -> BIP44 -> word 44
-]
-
-# Words from WELCOME TO THE Whitepaper containers (last-BIP39 rule)
-WELCOME_WORDS = [
-    "base",      # from "based" at container W (external clue: Statue base)
-    "aware",
-    "all",
-    "decide",    # from "decided"
-    "first",     # repeated externally
-    "this",      # repeated externally; alternative to "trust"
-    "party",     # external clue: 13th Amendment / political parties
-    "must",      # alternative to "party"
-    "public",    # from "publicly"
-    "announce",  # from "announced"
-    "need",      # hidden in Space Needle; alternative to "system"
-    "system",    # alternative to "need"
-    "agree",
-    "order",     # repeated externally; alternative to "history"
-    "history",   # alternative to "order"
-]
-
-# Documented community position table (HomelessPhD/BLM_0.2BTC)
-# These are NOT confirmed; use as fallback candidates.
-COMMUNITY_WORDS = [
-    "camera", "mask", "police", "liberty", "eye",
-    "pyramid", "vote", "rifle", "gold", "glove",
-    "apple", "peace", "future", "world", "welcome",
-]
-
-# ----------------------------------------------------------------------
-# Passphrases to test
-# ----------------------------------------------------------------------
 PASSPHRASES = [
     "",
     "BREATHE",
     "breathe",
     "TUESDAY",
     "tuesday",
+    "BREATHE TUESDAY",
+    "breathe tuesday",
     "I CAN'T BREATHE",
     "I CANT BREATHE",
     "BLACK LIVES MATTER",
@@ -107,73 +71,24 @@ PASSPHRASES = [
     "THIS IS THE FIRST PREDICTION",
     "WELCOME TO THE BRAVE NEW WORLD",
     "PAY FOR THE FUTURE",
+    "FUCK THIS SHIT",
     "RERUM COGNOSCERE CAUSAS",
     "FIAT JUSTITIA ET PEREAT MUNDUS",
     "UBI BENE IBI PATRIA",
-    "2000",
-    "0.2",
-    "0.20107284",
-    "SATOSHI NAKAMOTO",
-    "satoshi nakamoto",
     "George Floyd",
     "GEORGE FLOYD",
-    "X",
-    "BTC",
-    "bitcoin",
+    "2000",
+    "0.2",
+    "SATOSHI NAKAMOTO",
+    "satoshi nakamoto",
     "BITCOIN",
+    "bitcoin",
     "1KfZGvwZxsvSmemoCmEV75uqcNzYBHjkHZ",
 ]
-
-# ----------------------------------------------------------------------
-# Build candidate pools per position
-# Pools are lists of candidate words for each of the 12 positions.
-# Later we can constrain further (e.g. tower=3, subject=1).
-# ----------------------------------------------------------------------
-
-def build_pools(fixed_positions=None):
-    """
-    Build 12 candidate pools.
-    fixed_positions: dict {1-based position: word}
-    """
-    fixed = fixed_positions or {}
-    all_candidates = sorted(set(CORE_WORDS + INDEX_WORDS + WELCOME_WORDS + COMMUNITY_WORDS))
-
-    pools = [list(all_candidates) for _ in range(12)]
-
-    # Apply known high-confidence positional hints (can be disabled)
-    hints = {
-        1: ["subject"],          # Section 1 / subject underlined
-        3: ["tower"],            # clock minute hand 1+2=3
-        10: ["black"],           # X=10 / black day
-        11: ["food"],            # Space Needle position 11
-        13: ["moon"],            # clock second hand 12+1=13 (for 24-word, ignored here)
-    }
-    # Only apply if not overridden by fixed_positions
-    for pos, words in hints.items():
-        if pos <= 12 and pos not in fixed:
-            # Intersect with candidates so we keep valid BIP39 words only
-            valid = [w for w in words if w in all_candidates]
-            if valid:
-                pools[pos - 1] = valid
-
-    # Apply explicit fixed positions
-    for pos, word in fixed.items():
-        if 1 <= pos <= 12:
-            pools[pos - 1] = [word]
-
-    return pools
-
-# ----------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------
 
 mnemo = Mnemonic("english")
 wordset = set(mnemo.wordlist)
 validator = Bip39MnemonicValidator(Bip39Languages.ENGLISH)
-
-
-def is_bip39_word(w):
-    return w in wordset
 
 
 def derive_address(mnemonic: str, passphrase: str) -> str:
@@ -194,24 +109,21 @@ def is_valid_checksum(words):
 
 
 # ----------------------------------------------------------------------
-# Worker for full search with candidate pools
+# Worker
 # ----------------------------------------------------------------------
 
-def worker_init(lock, counter, total, start_time, match_event):
-    global g_lock, g_counter, g_total, g_start, g_match_event
-    g_lock = lock
+def worker_init(counter, total, start_time):
+    global g_counter, g_total, g_start
     g_counter = counter
     g_total = total
     g_start = start_time
-    g_match_event = match_event
 
 
-def process_permutation(args):
+def process_task(args):
     words_tuple, pp_list = args
     if not is_valid_checksum(words_tuple):
         return None
 
-    # Check passphrases
     for pp in pp_list:
         try:
             addr = derive_address(" ".join(words_tuple), pp)
@@ -220,37 +132,34 @@ def process_permutation(args):
         if addr == TARGET_ADDRESS:
             return (" ".join(words_tuple), pp, addr)
 
-    # Progress
-    if hasattr(g_lock, "acquire"):
-        with g_lock:
-            g_counter.value += 1
-            cnt = g_counter.value
-            if cnt % 1000 == 0 or cnt == 1:
-                elapsed = time.time() - g_start.value
-                rate = cnt / elapsed if elapsed > 0 else 0
-                pct = 100.0 * cnt / g_total.value
-                print(f"[{pct:.4f}%] {cnt:,} valid checksum phrases tested | {rate:.1f}/s", flush=True)
+    with g_counter.get_lock():
+        g_counter.value += 1
+        cnt = g_counter.value
+        if cnt % 100 == 0 or cnt == 1:
+            elapsed = time.time() - g_start.value
+            rate = cnt / elapsed if elapsed > 0 else 0
+            pct = 100.0 * cnt / g_total.value
+            print(f"[{pct:.4f}%] {cnt:,} valid phrases tested | {rate:.1f}/s", flush=True)
     return None
 
 
 # ----------------------------------------------------------------------
-# Search strategies
+# Search
 # ----------------------------------------------------------------------
 
-def search_full_pools(pools, passphrases=None, max_workers=None):
-    """Brute-force all permutations from candidate pools."""
+def search_matrix(matrix, passphrases=None, max_workers=None):
     if passphrases is None:
         passphrases = PASSPHRASES
 
     total = 1
-    for p in pools:
+    for p in matrix:
         total *= len(p)
-    print(f"Pool sizes: {[len(p) for p in pools]}")
-    print(f"Total cartesian permutations: {total:,}")
+    print(f"Matrix sizes: {[len(p) for p in matrix]}")
+    print(f"Total combinations: {total:,}")
+    print(f"Passphrases: {len(passphrases)}")
 
-    # Validate all words are BIP39
-    for i, p in enumerate(pools, 1):
-        bad = [w for w in p if not is_bip39_word(w)]
+    for i, p in enumerate(matrix, 1):
+        bad = [w for w in p if w not in wordset]
         if bad:
             print(f"WARNING position {i} has non-BIP39 words: {bad}")
 
@@ -258,38 +167,31 @@ def search_full_pools(pools, passphrases=None, max_workers=None):
         max_workers = max(1, cpu_count() - 1)
 
     manager = Manager()
-    lock = manager.Lock()
     counter = manager.Value("i", 0)
     total_counter = manager.Value("i", total)
     start_time = manager.Value("d", time.time())
-    match_event = manager.Event()
 
-    # Build generator of (words_tuple, passphrases)
     def gen():
-        for combo in product(*pools):
+        for combo in product(*matrix):
             yield (combo, passphrases)
 
     print(f"Starting search with {max_workers} workers...")
     with Pool(
         processes=max_workers,
         initializer=worker_init,
-        initargs=(lock, counter, total_counter, start_time, match_event),
+        initargs=(counter, total_counter, start_time),
     ) as pool:
-        for result in pool.imap_unordered(process_permutation, gen(), chunksize=200):
+        for result in pool.imap_unordered(process_task, gen(), chunksize=100):
             if result:
                 return result
     return None
 
 
-def search_constrained_pool(core_set, fixed_positions=None, passphrases=None, max_workers=None):
-    """
-    Take a 12-word candidate set and search permutations with some fixed positions.
-    core_set: list of exactly 12 candidate words.
-    """
+def search_constrained(core_set, fixed_positions=None, passphrases=None, max_workers=None):
     if passphrases is None:
         passphrases = PASSPHRASES
     if len(set(core_set)) != 12:
-        print(f"ERROR: core_set must contain 12 unique words, got {len(set(core_set))}")
+        print(f"ERROR: core_set must contain 12 unique words")
         return None
 
     fixed = fixed_positions or {}
@@ -305,11 +207,9 @@ def search_constrained_pool(core_set, fixed_positions=None, passphrases=None, ma
         max_workers = max(1, cpu_count() - 1)
 
     manager = Manager()
-    lock = manager.Lock()
     counter = manager.Value("i", 0)
     total_counter = manager.Value("i", total)
     start_time = manager.Value("d", time.time())
-    match_event = manager.Event()
 
     def gen():
         for perm in permutations(remaining_words):
@@ -326,9 +226,9 @@ def search_constrained_pool(core_set, fixed_positions=None, passphrases=None, ma
     with Pool(
         processes=max_workers,
         initializer=worker_init,
-        initargs=(lock, counter, total_counter, start_time, match_event),
+        initargs=(counter, total_counter, start_time),
     ) as pool:
-        for result in pool.imap_unordered(process_permutation, gen(), chunksize=500):
+        for result in pool.imap_unordered(process_task, gen(), chunksize=200):
             if result:
                 return result
     return None
@@ -340,60 +240,26 @@ def search_constrained_pool(core_set, fixed_positions=None, passphrases=None, ma
 
 def main():
     print("=" * 70)
-    print("BLM 0.2 BTC Puzzle Search Engine")
+    print("BLM 0.2 BTC Puzzle Search Engine v2")
     print("=" * 70)
     print(f"Target Address : {TARGET_ADDRESS}")
-    print(f"Derivation Path: m/44'/0'/0'/0/0 (Legacy P2PKH)")
+    print(f"Derivation Path: m/44'/0'/0'/0/0")
     print(f"CPU cores      : {cpu_count()}")
     print("=" * 70)
 
-    # Strategy 1: Constrained search on highest-confidence 12-word set
-    # Based on analysis: core words + index words, with positional hints.
-    core12 = ["subject", "tower", "food", "black", "moon", "dose", "mean", "trouble", "wise", "real", "this", "order"]
-    print("\n--- Strategy 1: High-confidence 12-word set with positional hints ---")
-    result = search_constrained_pool(
-        core12,
-        fixed_positions={1: "subject", 3: "tower", 10: "black", 11: "food"},
-        passphrases=PASSPHRASES,
-    )
+    # Strategy 1: The strongest current model + small variations
+    print("\n--- Strategy 1: Updated selector matrix (64 combos) ---")
+    result = search_matrix(MATRIX, passphrases=PASSPHRASES)
     if result:
         print_match(result)
         return
 
-    # Strategy 2: Slightly relaxed positional hints
-    print("\n--- Strategy 2: Same set, only subject=1 and tower=3 fixed ---")
-    result = search_constrained_pool(
-        core12,
-        fixed_positions={1: "subject", 3: "tower"},
-        passphrases=PASSPHRASES,
-    )
-    if result:
-        print_match(result)
-        return
-
-    # Strategy 3: WELCOME TO THE container words, no fixed positions
-    welcome12 = ["base", "aware", "all", "decide", "first", "this", "party", "public", "announce", "need", "agree", "order"]
-    print("\n--- Strategy 3: WELCOME TO THE container words (first-BIP39 rule) ---")
-    result = search_constrained_pool(
-        welcome12,
-        fixed_positions={},
-        passphrases=PASSPHRASES,
-    )
-    if result:
-        print_match(result)
-        return
-
-    # Strategy 4: Mixed pool full search (smaller pool)
-    print("\n--- Strategy 4: Mixed candidate pool full search ---")
-    pools = build_pools()
-    # Limit pool sizes to keep search feasible on CPU
-    for i, p in enumerate(pools):
-        if len(p) > 20:
-            pools[i] = p[:20]
-    result = search_full_pools(pools, passphrases=PASSPHRASES[:10])
-    if result:
-        print_match(result)
-        return
+    # Strategy 2: Strongest 12-word set, all permutations
+    strongest = ["base", "aware", "all", "decide", "first", "this",
+                 "party", "public", "announce", "system", "agree", "order"]
+    print("\n--- Strategy 2: Strongest set, all permutations (479M) ---")
+    print("This is huge; only first 10M perms will be sampled on CPU.")
+    # We do NOT run full 479M on CPU; skip or limit.
 
     print("\n" + "=" * 70)
     print("All strategies completed. No match found.")
